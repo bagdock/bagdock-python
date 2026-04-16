@@ -1,0 +1,115 @@
+"""HTTP client with sync and async interfaces."""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+import httpx
+
+from bagdock.exceptions import BagdockApiError, AuthenticationError, RateLimitError
+from bagdock.resources.operator import OperatorResource
+from bagdock.resources.marketplace import MarketplaceResource
+from bagdock.resources.loyalty import LoyaltyResource
+
+DEFAULT_BASE_URL = "https://api.bagdock.com/api/v1"
+DEFAULT_TIMEOUT = 30.0
+DEFAULT_MAX_RETRIES = 2
+
+
+class _BaseClient:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout: float = DEFAULT_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+    ) -> None:
+        self.api_key = api_key or os.environ.get("BAGDOCK_API_KEY", "")
+        if not self.api_key:
+            raise AuthenticationError(
+                "Missing API key. Pass `api_key` or set BAGDOCK_API_KEY."
+            )
+        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
+        self.timeout = timeout
+        self.max_retries = max_retries
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "bagdock-python/0.1.0",
+        }
+
+
+class Bagdock(_BaseClient):
+    """Synchronous Bagdock API client."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        transport = httpx.HTTPTransport(retries=self.max_retries)
+        self._http = httpx.Client(
+            base_url=self.base_url,
+            headers=self._headers(),
+            timeout=self.timeout,
+            transport=transport,
+        )
+        self.operator = OperatorResource(self._http)
+        self.marketplace = MarketplaceResource(self._http)
+        self.loyalty = LoyaltyResource(self._http)
+
+    def close(self) -> None:
+        self._http.close()
+
+    def __enter__(self) -> Bagdock:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: Any = None,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
+        response = self._http.request(method, path, json=json, params=params)
+        return _handle_response(response)
+
+
+class AsyncBagdock(_BaseClient):
+    """Asynchronous Bagdock API client."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        transport = httpx.AsyncHTTPTransport(retries=self.max_retries)
+        self._http = httpx.AsyncClient(
+            base_url=self.base_url,
+            headers=self._headers(),
+            timeout=self.timeout,
+            transport=transport,
+        )
+        self.operator = OperatorResource(self._http)
+        self.marketplace = MarketplaceResource(self._http)
+        self.loyalty = LoyaltyResource(self._http)
+
+    async def close(self) -> None:
+        await self._http.aclose()
+
+    async def __aenter__(self) -> AsyncBagdock:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        await self.close()
+
+
+def _handle_response(response: httpx.Response) -> Any:
+    if response.status_code == 204:
+        return None
+    if response.status_code == 429:
+        raise RateLimitError(response=response)
+    if response.status_code >= 400:
+        raise BagdockApiError.from_response(response)
+    return response.json()
